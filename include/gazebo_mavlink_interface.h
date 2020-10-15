@@ -56,6 +56,7 @@
 #include <ignition/math.hh>
 #include <sdf/sdf.hh>
 #include <common.h>
+#include <Airspeed.pb.h>
 #include <CommandMotorSpeed.pb.h>
 #include <MotorSpeed.pb.h>
 #include <Imu.pb.h>
@@ -69,30 +70,19 @@
 #include <Pressure.pb.h>
 #include <Wind.pb.h>
 
-#include <mavlink/v2.0/common/mavlink.h>
+#include "mavlink_interface.h"
 #include "msgbuffer.h"
 
-static const uint32_t kDefaultMavlinkUdpPort = 14560;
-static const uint32_t kDefaultMavlinkTcpPort = 4560;
-static const uint32_t kDefaultQGCUdpPort = 14550;
-static const uint32_t kDefaultSDKUdpPort = 14540;
-
-using lock_guard = std::lock_guard<std::recursive_mutex>;
-static constexpr auto kDefaultDevice = "/dev/ttyACM0";
-static constexpr auto kDefaultBaudRate = 921600;
-
-//! Maximum buffer size with padding for CRC bytes (280 + padding)
-static constexpr ssize_t MAX_SIZE = MAVLINK_MAX_PACKET_LEN + 16;
-static constexpr size_t MAX_TXQ_SIZE = 1000;
-
 //! Default distance sensor model joint naming
-static const std::regex kDefaultLidarModelLinkNaming("(lidar|sf10a)(.*::link)");
-static const std::regex kDefaultSonarModelLinkNaming("(sonar|mb1240-xl-ez4)(.*::link)");
+static const std::regex kDefaultLidarModelJointNaming(".*(lidar|sf10a)(.*_joint)");
+static const std::regex kDefaultSonarModelJointNaming(".*(sonar|mb1240-xl-ez4)(.*_joint)");
+static const std::regex kDefaultGPSModelJointNaming(".*(gps|ublox-neo-7M)(.*_joint)");
 
 namespace gazebo {
 
 typedef const boost::shared_ptr<const mav_msgs::msgs::CommandMotorSpeed> CommandMotorSpeedPtr;
 typedef const boost::shared_ptr<const nav_msgs::msgs::Odometry> OdomPtr;
+typedef const boost::shared_ptr<const sensor_msgs::msgs::Airspeed> AirspeedPtr;
 typedef const boost::shared_ptr<const sensor_msgs::msgs::Groundtruth> GtPtr;
 typedef const boost::shared_ptr<const sensor_msgs::msgs::Imu> ImuPtr;
 typedef const boost::shared_ptr<const sensor_msgs::msgs::IRLock> IRLockPtr;
@@ -117,29 +107,12 @@ static const std::string kDefaultMotorVelocityReferencePubTopic = "/gazebo/comma
 static const std::string kDefaultImuTopic = "/imu";
 static const std::string kDefaultOpticalFlowTopic = "/px4flow/link/opticalFlow";
 static const std::string kDefaultIRLockTopic = "/camera/link/irlock";
-static const std::string kDefaultGPSTopic = "/gps";
 static const std::string kDefaultVisionTopic = "/vision_odom";
 static const std::string kDefaultMagTopic = "/mag";
+static const std::string kDefaultAirspeedTopic = "/airspeed";
 static const std::string kDefaultBarometerTopic = "/baro";
-static const std::string kDefaultWindTopic = "/wind";
-
-//! Rx packer framing status. (same as @p mavlink::mavlink_framing_t)
-enum class Framing : uint8_t {
-	incomplete = MAVLINK_FRAMING_INCOMPLETE,
-	ok = MAVLINK_FRAMING_OK,
-	bad_crc = MAVLINK_FRAMING_BAD_CRC,
-	bad_signature = MAVLINK_FRAMING_BAD_SIGNATURE,
-};
-
-
-//! Enumeration to use on the bitmask in HIL_SENSOR
-enum class SensorSource {
-  ACCEL		= 0b111,
-  GYRO		= 0b111000,
-  MAG		= 0b111000000,
-  BARO		= 0b1101000000000,
-  DIFF_PRESS	= 0b10000000000,
-};
+static const std::string kDefaultWindTopic = "/world_wind";
+static const std::string kDefaultGroundtruthTopic = "/groundtruth";
 
 //! OR operation for the enumeration and unsigned types that returns the bitmask
 template<typename A, typename B>
@@ -158,73 +131,7 @@ static inline uint32_t operator |(A lhs, B rhs) {
 
 class GazeboMavlinkInterface : public ModelPlugin {
 public:
-  GazeboMavlinkInterface() : ModelPlugin(),
-    received_first_actuator_(false),
-    namespace_(kDefaultNamespace),
-    protocol_version_(2.0),
-    motor_velocity_reference_pub_topic_(kDefaultMotorVelocityReferencePubTopic),
-    use_propeller_pid_(false),
-    use_elevator_pid_(false),
-    use_left_elevon_pid_(false),
-    use_right_elevon_pid_(false),
-    vehicle_is_tailsitter_(false),
-    send_vision_estimation_(false),
-    send_odometry_(false),
-    imu_sub_topic_(kDefaultImuTopic),
-    opticalFlow_sub_topic_(kDefaultOpticalFlowTopic),
-    irlock_sub_topic_(kDefaultIRLockTopic),
-    gps_sub_topic_(kDefaultGPSTopic),
-    vision_sub_topic_(kDefaultVisionTopic),
-    mag_sub_topic_(kDefaultMagTopic),
-    baro_sub_topic_(kDefaultBarometerTopic),
-    sensor_map_ {},
-    wind_sub_topic_(kDefaultWindTopic),
-    model_ {},
-    world_(nullptr),
-    left_elevon_joint_(nullptr),
-    right_elevon_joint_(nullptr),
-    elevator_joint_(nullptr),
-    propeller_joint_(nullptr),
-    gimbal_yaw_joint_(nullptr),
-    gimbal_pitch_joint_(nullptr),
-    gimbal_roll_joint_(nullptr),
-    input_offset_ {},
-    input_scaling_ {},
-    zero_position_disarmed_ {},
-    zero_position_armed_ {},
-    input_index_ {},
-    mag_updated_(false),
-    baro_updated_(false),
-    diff_press_updated_(false),
-    groundtruth_lat_rad(0.0),
-    groundtruth_lon_rad(0.0),
-    groundtruth_altitude(0.0),
-    mavlink_udp_port_(kDefaultMavlinkUdpPort),
-    mavlink_tcp_port_(kDefaultMavlinkTcpPort),
-    simulator_socket_fd_(0),
-    simulator_tcp_client_fd_(0),
-    use_tcp_(false),
-    qgc_udp_port_(kDefaultQGCUdpPort),
-    sdk_udp_port_(kDefaultSDKUdpPort),
-    remote_qgc_addr_ {},
-    local_qgc_addr_ {},
-    remote_sdk_addr_ {},
-    local_sdk_addr_ {},
-    qgc_socket_fd_(0),
-    sdk_socket_fd_(0),
-    serial_enabled_(false),
-    tx_q {},
-    rx_buf {},
-    m_status {},
-    m_buffer {},
-    io_service(),
-    serial_dev(io_service),
-    device_(kDefaultDevice),
-    baudrate_(kDefaultBaudRate),
-    hil_mode_(false),
-    hil_state_level_(false)
-    {}
-
+  GazeboMavlinkInterface();
   ~GazeboMavlinkInterface();
 
   void Publish();
@@ -234,13 +141,15 @@ protected:
   void OnUpdate(const common::UpdateInfo&  /*_info*/);
 
 private:
-  bool received_first_actuator_;
+  bool received_first_actuator_{false};
   Eigen::VectorXd input_reference_;
 
-  float protocol_version_;
+  float protocol_version_{2.0};
 
-  std::string namespace_;
-  std::string motor_velocity_reference_pub_topic_;
+  std::unique_ptr<MavlinkInterface> mavlink_interface_;
+
+  std::string namespace_{kDefaultNamespace};
+  std::string motor_velocity_reference_pub_topic_{kDefaultMotorVelocityReferencePubTopic};
   std::string mavlink_control_sub_topic_;
   std::string link_name_;
 
@@ -248,40 +157,22 @@ private:
   transport::PublisherPtr motor_velocity_reference_pub_;
   transport::SubscriberPtr mav_control_sub_;
 
-  physics::ModelPtr model_;
-  physics::WorldPtr world_;
-  physics::JointPtr left_elevon_joint_;
-  physics::JointPtr right_elevon_joint_;
-  physics::JointPtr elevator_joint_;
-  physics::JointPtr propeller_joint_;
-  physics::JointPtr gimbal_yaw_joint_;
-  physics::JointPtr gimbal_pitch_joint_;
-  physics::JointPtr gimbal_roll_joint_;
-  common::PID propeller_pid_;
-  common::PID elevator_pid_;
-  common::PID left_elevon_pid_;
-  common::PID right_elevon_pid_;
-  bool use_propeller_pid_;
-  bool use_elevator_pid_;
-  bool use_left_elevon_pid_;
-  bool use_right_elevon_pid_;
+  physics::ModelPtr model_{};
+  physics::WorldPtr world_{nullptr};
 
-  bool vehicle_is_tailsitter_;
-
-  bool send_vision_estimation_;
-  bool send_odometry_;
+  bool send_vision_estimation_{false};
+  bool send_odometry_{false};
 
   std::vector<physics::JointPtr> joints_;
   std::vector<common::PID> pids_;
+  std::vector<double> joint_max_errors_;
 
   /// \brief Pointer to the update event connection.
   event::ConnectionPtr updateConnection_;
   event::ConnectionPtr sigIntConnection_;
 
-  boost::thread callback_queue_thread_;
-  void QueueThread();
   void ImuCallback(ImuPtr& imu_msg);
-  void GpsCallback(GpsPtr& gps_msg);
+  void GpsCallback(GpsPtr& gps_msg, const int& id);
   void GroundtruthCallback(GtPtr& groundtruth_msg);
   void LidarCallback(LidarPtr& lidar_msg, const int& id);
   void SonarCallback(SonarPtr& sonar_msg, const int& id);
@@ -289,16 +180,12 @@ private:
   void IRLockCallback(IRLockPtr& irlock_msg);
   void VisionCallback(OdomPtr& odom_msg);
   void MagnetometerCallback(MagnetometerPtr& mag_msg);
+  void AirspeedCallback(AirspeedPtr& airspeed_msg);
   void BarometerCallback(BarometerPtr& baro_msg);
   void WindVelocityCallback(WindPtr& msg);
-  void send_mavlink_message(const mavlink_message_t *message);
-  void forward_mavlink_message(const mavlink_message_t *message);
-  void handle_message(mavlink_message_t *msg, bool &received_actuator);
-  void acceptConnections();
-  void pollForMAVLinkMessages();
-  void pollFromQgcAndSdk();
   void SendSensorMessages();
   void SendGroundTruth();
+  void handle_actuator_controls();
   void handle_control(double _dt);
   bool IsRunning();
   void onSigInt();
@@ -323,50 +210,40 @@ private:
   template <typename GazeboMsgT>
   void CreateSensorSubscription(
       void (GazeboMavlinkInterface::*fp)(const boost::shared_ptr<GazeboMsgT const>&, const int&),
-      GazeboMavlinkInterface* ptr, const physics::Link_V& links);
-
-  // Serial interface
-  void open();
-  void close();
-  void do_read();
-  void parse_buffer(const boost::system::error_code& err, std::size_t bytes_t);
-  void do_write(bool check_tx_state);
-  inline bool is_open(){
-    return serial_dev.is_open();
-  }
+      GazeboMavlinkInterface* ptr, const physics::Joint_V& joints, const std::regex& model);
 
   static const unsigned n_out_max = 16;
 
-  double input_offset_[n_out_max];
-  double input_scaling_[n_out_max];
+  double input_offset_[n_out_max]{};
+  double input_scaling_[n_out_max]{};
   std::string joint_control_type_[n_out_max];
   std::string gztopic_[n_out_max];
-  double zero_position_disarmed_[n_out_max];
-  double zero_position_armed_[n_out_max];
-  int input_index_[n_out_max];
+  double zero_position_disarmed_[n_out_max]{};
+  double zero_position_armed_[n_out_max]{};
+  int input_index_[n_out_max]{};
   transport::PublisherPtr joint_control_pub_[n_out_max];
 
-  transport::SubscriberPtr imu_sub_;
-  transport::SubscriberPtr opticalFlow_sub_;
-  transport::SubscriberPtr irlock_sub_;
-  transport::SubscriberPtr gps_sub_;
-  transport::SubscriberPtr groundtruth_sub_;
-  transport::SubscriberPtr vision_sub_;
-  transport::SubscriberPtr mag_sub_;
-  transport::SubscriberPtr baro_sub_;
-  transport::SubscriberPtr wind_sub_;
+  transport::SubscriberPtr imu_sub_{nullptr};
+  transport::SubscriberPtr opticalFlow_sub_{nullptr};
+  transport::SubscriberPtr irlock_sub_{nullptr};
+  transport::SubscriberPtr groundtruth_sub_{nullptr};
+  transport::SubscriberPtr vision_sub_{nullptr};
+  transport::SubscriberPtr mag_sub_{nullptr};
+  transport::SubscriberPtr airspeed_sub_{nullptr};
+  transport::SubscriberPtr baro_sub_{nullptr};
+  transport::SubscriberPtr wind_sub_{nullptr};
 
-  Sensor_M sensor_map_; // Map of sensor SubscriberPtr, IDs and orientations
+  Sensor_M sensor_map_{}; // Map of sensor SubscriberPtr, IDs and orientations
 
-  std::string imu_sub_topic_;
-  std::string opticalFlow_sub_topic_;
-  std::string irlock_sub_topic_;
-  std::string gps_sub_topic_;
-  std::string groundtruth_sub_topic_;
-  std::string vision_sub_topic_;
-  std::string mag_sub_topic_;
-  std::string baro_sub_topic_;
-  std::string wind_sub_topic_;
+  std::string imu_sub_topic_{kDefaultImuTopic};
+  std::string opticalFlow_sub_topic_{kDefaultOpticalFlowTopic};
+  std::string irlock_sub_topic_{kDefaultIRLockTopic};
+  std::string groundtruth_sub_topic_{kDefaultGroundtruthTopic};
+  std::string vision_sub_topic_{kDefaultVisionTopic};
+  std::string mag_sub_topic_{kDefaultMagTopic};
+  std::string airspeed_sub_topic_{kDefaultAirspeedTopic};
+  std::string baro_sub_topic_{kDefaultBarometerTopic};
+  std::string wind_sub_topic_{kDefaultWindTopic};
 
   std::mutex last_imu_message_mutex_ {};
   std::condition_variable last_imu_message_cond_ {};
@@ -375,90 +252,36 @@ private:
   common::Time last_imu_time_;
   common::Time last_actuator_time_;
 
-  bool mag_updated_;
-  bool baro_updated_;
-  bool diff_press_updated_;
+  bool mag_updated_{false};
+  bool baro_updated_{false};
+  bool diff_press_updated_{false};
 
-  double groundtruth_lat_rad;
-  double groundtruth_lon_rad;
-  double groundtruth_altitude;
+  double groundtruth_lat_rad_{0.0};
+  double groundtruth_lon_rad_{0.0};
+  double groundtruth_altitude_{0.0};
 
-  double imu_update_interval_ = 0.004; ///< Used for non-lockstep
+  double imu_update_interval_{0.004}; ///< Used for non-lockstep
 
-  ignition::math::Vector3d gravity_W_;
   ignition::math::Vector3d velocity_prev_W_;
   ignition::math::Vector3d mag_n_;
   ignition::math::Vector3d wind_vel_;
 
-  double temperature_;
-  double pressure_alt_;
-  double abs_pressure_;
+  double temperature_{25.0};
+  double pressure_alt_{0.0};
+  double abs_pressure_{0.0};
 
-  std::default_random_engine random_generator_;
-  std::normal_distribution<float> standard_normal_distribution_;
+  bool close_conn_{false};
 
-  struct sockaddr_in local_simulator_addr_;
-  socklen_t local_simulator_addr_len_;
-  struct sockaddr_in remote_simulator_addr_;
-  socklen_t remote_simulator_addr_len_;
+  double optflow_distance_{0.0};
+  double diff_pressure_{0.0};
 
-  int qgc_udp_port_;
-  struct sockaddr_in remote_qgc_addr_;
-  socklen_t remote_qgc_addr_len_;
-  struct sockaddr_in local_qgc_addr_;
-  socklen_t local_qgc_addr_len_;
+  bool enable_lockstep_{false};
+  double speed_factor_{1.0};
+  int64_t previous_imu_seq_{0};
+  unsigned update_skip_factor_{1};
 
-  int sdk_udp_port_;
-  struct sockaddr_in remote_sdk_addr_;
-  socklen_t remote_sdk_addr_len_;
-  struct sockaddr_in local_sdk_addr_;
-  socklen_t local_sdk_addr_len_;
+  bool hil_mode_{false};
+  bool hil_state_level_{false};
 
-  unsigned char _buf[65535];
-  enum FD_TYPES {
-    LISTEN_FD,
-    CONNECTION_FD,
-    N_FDS
-  };
-  struct pollfd fds_[N_FDS];
-  bool use_tcp_ = false;
-  bool close_conn_ = false;
-
-  double optflow_distance;
-  double sonar_distance;
-
-  in_addr_t mavlink_addr_;
-  int mavlink_udp_port_; // MAVLink refers to the PX4 simulator interface here
-  int mavlink_tcp_port_; // MAVLink refers to the PX4 simulator interface here
-
-  int simulator_socket_fd_;
-  int simulator_tcp_client_fd_;
-
-  int qgc_socket_fd_ {-1};
-  int sdk_socket_fd_ {-1};
-
-  bool enable_lockstep_ = false;
-  double speed_factor_ = 1.0;
-  int64_t previous_imu_seq_ = 0;
-  unsigned update_skip_factor_ = 1;
-
-  // Serial interface
-  mavlink_status_t m_status;
-  mavlink_message_t m_buffer;
-  bool serial_enabled_;
-  std::thread io_thread;
-  std::string device_;
-  std::array<uint8_t, MAX_SIZE> rx_buf;
-  std::recursive_mutex mutex;
-  unsigned int baudrate_;
-  std::atomic<bool> tx_in_progress;
-  std::deque<MsgBuffer> tx_q;
-  boost::asio::io_service io_service;
-  boost::asio::serial_port serial_dev;
-
-  bool hil_mode_;
-  bool hil_state_level_;
-
-  std::atomic<bool> gotSigInt_ {false};
 };
 }

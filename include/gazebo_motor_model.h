@@ -50,7 +50,7 @@ static const std::string kDefaultNamespace = "";
 static const std::string kDefaultCommandSubTopic = "/gazebo/command/motor_speed";
 static const std::string kDefaultMotorFailureNumSubTopic = "/gazebo/motor_failure_num";
 static const std::string kDefaultMotorVelocityPubTopic = "/motor_speed";
-std::string wind_sub_topic_ = "/wind";
+std::string wind_sub_topic_ = "/world_wind";
 
 typedef const boost::shared_ptr<const mav_msgs::msgs::CommandMotorSpeed> CommandMotorSpeedPtr;
 typedef const boost::shared_ptr<const physics_msgs::msgs::Wind> WindPtr;
@@ -93,7 +93,8 @@ class GazeboMotorModel : public MotorModel, public ModelPlugin {
         rotor_drag_coefficient_(kDefaultRotorDragCoefficient),
         rotor_velocity_slowdown_sim_(kDefaultRotorVelocitySlowdownSim),
         time_constant_down_(kDefaultTimeConstantDown),
-        time_constant_up_(kDefaultTimeConstantUp) {
+        time_constant_up_(kDefaultTimeConstantUp),
+        reversible_(false) {
   }
 
   virtual ~GazeboMotorModel();
@@ -135,6 +136,8 @@ class GazeboMotorModel : public MotorModel, public ModelPlugin {
   double rotor_velocity_slowdown_sim_;
   double time_constant_down_;
   double time_constant_up_;
+
+  bool reversible_;
 
   transport::NodePtr node_handle_;
   transport::PublisherPtr motor_velocity_pub_;

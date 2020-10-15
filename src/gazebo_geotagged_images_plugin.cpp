@@ -40,20 +40,6 @@ static void* start_thread(void* param) {
 
 GeotaggedImagesPlugin::GeotaggedImagesPlugin()
     : SensorPlugin()
-    , _imageCounter(0)
-    , _width(0)
-    , _height(0)
-    , _depth(0)
-    , _destWidth(0)
-    , _destHeight(0)
-    , _captureCount(0)
-    , _captureInterval(0.0)
-    , _fd(-1)
-    , _mode(CAMERA_MODE_VIDEO)
-    , _captureMode(CAPTURE_DISABLED)
-    , _hfov(1.57)
-    , _zoom(1.0)
-    , _maxZoom(8.0)
 {
 }
 
@@ -241,7 +227,10 @@ void GeotaggedImagesPlugin::OnNewFrame(const unsigned char * image)
              " -gpsmeasuremode=3-d -gpssatellites=13 -gpsaltitude=%.3lf -overwrite_original %s &>/dev/null",
              north_south, east_west, lat, lon, _lastGpsPosition.Z(), file_name);
 
-    system(gps_tag_command);
+    if (system(gps_tag_command) < 0) {
+        gzerr << "gps tag command failed" << endl;
+        return;
+    }
 
     gzmsg << "Took picture: " << file_name << endl;
 
@@ -428,6 +417,14 @@ void GeotaggedImagesPlugin::cameraThread() {
             _last_heartbeat = current_time;
             _send_heartbeat();
         }
+
+        //Move camera zoom incase of continuous zoom
+        // _zoom_cmd is set by MAV_CMD_SET_CAMERA_ZOOM
+        if (_zoom_cmd!=0) {
+            _zoom = std::max(std::min(float(_zoom + 0.05 * _zoom_cmd), _maxZoom), 1.0f);
+            _camera->SetHFOV(_hfov / _zoom);
+        }
+
     }
 }
 
@@ -689,8 +686,13 @@ void GeotaggedImagesPlugin::_handle_camera_zoom(const mavlink_message_t *pMsg, s
     _send_cmd_ack(pMsg->sysid, pMsg->compid,
                   MAV_CMD_SET_CAMERA_ZOOM, MAV_RESULT_ACCEPTED, srcaddr);
 
-    _zoom = std::max(std::min(float(_zoom + 0.1 * cmd.param2), _maxZoom), 1.0f);
-    _camera->SetHFOV(_hfov / _zoom);
+    if (cmd.param1 == ZOOM_TYPE_CONTINUOUS) {
+        _zoom = std::max(std::min(float(_zoom + 0.1 * cmd.param2), _maxZoom), 1.0f);
+        _zoom_cmd = cmd.param2;
+    } else {
+        _zoom = std::max(std::min(float(_zoom + 0.1 * cmd.param2), _maxZoom), 1.0f);
+        _camera->SetHFOV(_hfov / _zoom);
+    }
 }
 
 void GeotaggedImagesPlugin::_send_capture_status(struct sockaddr* srcaddr)
@@ -703,18 +705,26 @@ void GeotaggedImagesPlugin::_send_capture_status(struct sockaddr* srcaddr)
     float available_mib = 0.0f;
     boost::filesystem::space_info si = boost::filesystem::space(".");
     available_mib = (float)((double)si.available / (1024.0 * 1024.0));
+
+#if GAZEBO_MAJOR_VERSION >= 9
+    common::Time current_time = _scene->SimTime();
+#else
+    common::Time current_time = _scene->GetSimTime();
+#endif
+
     mavlink_message_t msg;
     mavlink_msg_camera_capture_status_pack_chan(
         1,
         MAV_COMP_ID_CAMERA,
         MAVLINK_COMM_1,
         &msg,
-        0,
+        current_time.Double() * 1e3,
         status,                                 // image status
         0,                                      // video status (Idle)
         interval,                               // image interval
-        0,                                      // recording_time_s
-        available_mib);                         // available_capacity
+        0,                                      // recording time in ms
+        available_mib,                          // available storage capacity
+        _imageCounter);                         // total number of images
     _send_mavlink_message(&msg, srcaddr);
 }
 

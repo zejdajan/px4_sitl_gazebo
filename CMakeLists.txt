@@ -9,14 +9,32 @@ endif()
 
 message(STATUS "install-prefix: ${CMAKE_INSTALL_PREFIX}")
 
+# CMake build type (Debug Release RelWithDebInfo MinSizeRel)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE "RelWithDebInfo")
+  set(CMAKE_BUILD_TYPE ${CMAKE_BUILD_TYPE} CACHE STRING "Build type" FORCE)
+endif()
+
+set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug;Release;RelWithDebInfo;MinSizeRel;Coverage;AddressSanitizer;UndefinedBehaviorSanitizer")
+message(STATUS "cmake build type: ${CMAKE_BUILD_TYPE}")
+
 project(mavlink_sitl_gazebo VERSION 1.0.0)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+
+# Set c++11 or higher
+include(EnableC++XX)
+# Set c11
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+include(ccache)
 include(GNUInstallDirs)
 
 #######################
 ## Find Dependencies ##
 #######################
-
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 
 option(BUILD_GSTREAMER_PLUGIN "enable gstreamer plugin" ON)
 option(BUILD_ROS_INTERFACE "Enable building ROS dependent plugins" OFF)
@@ -24,20 +42,23 @@ option(BUILD_ROS_INTERFACE "Enable building ROS dependent plugins" OFF)
 option(SEND_VISION_ESTIMATION_DATA "Send Mavlink VISION_POSITION_ESTIMATE msgs" OFF)
 option(SEND_ODOMETRY_DATA "Send Mavlink ODOMETRY msgs" OFF)
 
-# Set c++11 or higher
-include(EnableC++XX)
-
 ## System dependencies are found with CMake's conventions
 find_package(Boost 1.58 REQUIRED COMPONENTS system thread filesystem)
 find_package(gazebo REQUIRED)
 find_package(PkgConfig REQUIRED)
-find_program(px4 REQUIRED)
+pkg_search_module(GLIB REQUIRED glib-2.0)
 # Note: If using catkin, Python 2 is found since it points
 # to the Python libs installed with the ROS distro
 if (NOT CATKIN_DEVEL_PREFIX)
 	find_package(PythonInterp 3 REQUIRED)
 else()
-	find_package(PythonInterp REQUIRED)
+	find_package(roscpp REQUIRED)
+	message(STATUS "${roscpp_version}")
+	if(${roscpp_VERSION}  VERSION_LESS "1.15.0")
+		find_package(PythonInterp REQUIRED)
+	else()
+		find_package(PythonInterp 3 REQUIRED)
+	endif()
 endif()
 find_package(OpenCV REQUIRED)
 find_package(TinyXML REQUIRED)
@@ -144,8 +165,7 @@ endif()
 ## Build ##
 ###########
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99 -Wno-deprecated-declarations -Wno-address-of-packed-member")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations -Wno-address-of-packed-member")
+add_compile_options(-Wno-deprecated-declarations -Wno-address-of-packed-member)
 
 set(GAZEBO_MSG_INCLUDE_DIRS)
 foreach(ITR ${GAZEBO_INCLUDE_DIRS})
@@ -188,7 +208,7 @@ link_libraries(
 if (GSTREAMER_FOUND)
   link_libraries(
     ${GSTREAMER_LIBRARIES}
-    glib-2.0
+    ${GLIB_LDFLAGS}
     gobject-2.0
   )
 endif()
@@ -208,7 +228,6 @@ set(enable_ground_truth "false")
 set(enable_logging "false")
 set(enable_camera "false")
 set(enable_wind "false")
-set(rotors_description_dir "${CMAKE_CURRENT_SOURCE_DIR}/models/rotors_description")
 set(scripts_dir "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
 # set the vision estimation to be sent if set by the CMake option SEND_VISION_ESTIMATION_DATA
 set(send_vision_estimation "false")
@@ -224,24 +243,12 @@ if (SEND_ODOMETRY_DATA)
   set(send_vision_estimation "false")
 endif()
 
-add_custom_command(OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/models/iris/iris.sdf
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  COMMAND rm -f ${CMAKE_CURRENT_SOURCE_DIR}/models/iris/iris.sdf
-  COMMAND ${PYTHON_EXECUTABLE} ${scripts_dir}/xacro.py -o  ${rotors_description_dir}/urdf/iris_base.urdf  ${rotors_description_dir}/urdf/iris_base.xacro enable_mavlink_interface:=${enable_mavlink_interface} enable_ground_truth:=${enable_ground_truth} enable_wind:=${enable_wind} enable_logging:=${enable_logging} rotors_description_dir:=${rotors_description_dir} send_vision_estimation:=${send_vision_estimation} send_odometry:=${send_odometry}
-  COMMAND gz sdf -p  ${rotors_description_dir}/urdf/iris_base.urdf >> ${CMAKE_CURRENT_SOURCE_DIR}/models/iris/iris.sdf
-  COMMAND rm -f ${rotors_description_dir}/urdf/iris_base.urdf
-  DEPENDS ${rotors_description_dir}/urdf/iris.xacro
-  DEPENDS ${rotors_description_dir}/urdf/iris_base.xacro
-  DEPENDS ${rotors_description_dir}/urdf/component_snippets.xacro
-  )
-add_custom_target(sdf ALL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/models/iris/iris.sdf)
-
-
 #-----------#
 # Functions #
 #-----------#
 
 function(glob_generate target file_glob)
+  file(READ .gitignore gitignore_content)
   file(GLOB_RECURSE glob_files RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} ${file_glob})
 	set(gen_files)
 	foreach(glob_file ${glob_files})
@@ -251,15 +258,21 @@ function(glob_generate target file_glob)
 		set(in_file ${CMAKE_CURRENT_SOURCE_DIR}/${glob_file})
 		file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${file_dir})
 		set(out_file ${CMAKE_CURRENT_SOURCE_DIR}/${file_name})
-		string(REGEX REPLACE ".sdf" "-gen.sdf" out_file ${out_file})
+		string(REGEX REPLACE ".sdf" ".sdf" out_file ${out_file})
 		if (${file_ext} STREQUAL "jinja")
 			add_custom_command(OUTPUT ${out_file}
-        COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/jinja_gen.py
-        ${in_file} ${CMAKE_CURRENT_SOURCE_DIR}
-				DEPENDS ${in_file}
+				COMMAND
+					${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/jinja_gen.py ${in_file} ${CMAKE_CURRENT_SOURCE_DIR}
+				DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/jinja_gen.py ${in_file}
 				VERBATIM
 				)
 			list(APPEND gen_files_${target} ${out_file})
+			string(REGEX REPLACE "${CMAKE_CURRENT_SOURCE_DIR}/" "" gitignore_str ${in_file})
+			string(REGEX REPLACE ".jinja" "" gitignore_str ${gitignore_str})
+			string(FIND ${gitignore_content} ${gitignore_str} gitignore_substr)
+			if(${gitignore_substr} EQUAL -1)
+				file(APPEND .gitignore ${gitignore_str} "\n")
+			endif()
 		endif()
 	endforeach()
 	add_custom_target(${target} ALL DEPENDS ${gen_files_${target}})
@@ -279,6 +292,7 @@ set(nav_msgs msgs/Odometry.proto)
 set(physics_msgs msgs/Wind.proto)
 set(std_msgs msgs/Int32.proto)
 set(sensor_msgs
+  msgs/Airspeed.proto
   msgs/Imu.proto
   msgs/IRLock.proto
   msgs/Float.proto
@@ -309,8 +323,10 @@ add_library(sensor_msgs SHARED ${SEN_PROTO_SRCS})
 link_libraries(mav_msgs nav_msgs std_msgs sensor_msgs)
 link_libraries(physics_msgs)
 
+add_library(gazebo_airspeed_plugin SHARED src/gazebo_airspeed_plugin.cpp)
 add_library(gazebo_geotagged_images_plugin SHARED src/gazebo_geotagged_images_plugin.cpp)
 add_library(gazebo_gps_plugin SHARED src/gazebo_gps_plugin.cpp)
+add_library(gazebo_groundtruth_plugin SHARED src/gazebo_groundtruth_plugin.cpp)
 add_library(gazebo_irlock_plugin SHARED src/gazebo_irlock_plugin.cpp)
 add_library(gazebo_lidar_plugin SHARED src/gazebo_lidar_plugin.cpp)
 add_library(gazebo_opticalflow_mockup_plugin SHARED src/gazebo_opticalflow_mockup_plugin.cpp)
@@ -321,7 +337,7 @@ add_library(gazebo_vision_plugin SHARED src/gazebo_vision_plugin.cpp)
 add_library(gazebo_controller_interface SHARED src/gazebo_controller_interface.cpp)
 add_library(gazebo_gimbal_controller_plugin SHARED src/gazebo_gimbal_controller_plugin.cpp)
 add_library(gazebo_imu_plugin SHARED src/gazebo_imu_plugin.cpp)
-add_library(gazebo_mavlink_interface SHARED src/gazebo_mavlink_interface.cpp )
+add_library(gazebo_mavlink_interface SHARED src/gazebo_mavlink_interface.cpp src/mavlink_interface.cpp)
 add_library(gazebo_motor_model SHARED src/gazebo_motor_model.cpp)
 add_library(gazebo_multirotor_base_plugin SHARED src/gazebo_multirotor_base_plugin.cpp)
 add_library(gazebo_wind_plugin SHARED src/gazebo_wind_plugin.cpp)
@@ -330,10 +346,13 @@ add_library(gazebo_barometer_plugin SHARED src/gazebo_barometer_plugin.cpp)
 add_library(gazebo_catapult_plugin SHARED src/gazebo_catapult_plugin.cpp)
 add_library(gazebo_usv_dynamics_plugin SHARED src/gazebo_usv_dynamics_plugin.cpp)
 add_library(gazebo_parachute_plugin SHARED src/gazebo_parachute_plugin.cpp)
+add_library(gazebo_airship_dynamics_plugin SHARED src/gazebo_airship_dynamics_plugin.cpp)
 
 set(plugins
+  gazebo_airspeed_plugin
   gazebo_geotagged_images_plugin
   gazebo_gps_plugin
+  gazebo_groundtruth_plugin
   gazebo_irlock_plugin
   gazebo_lidar_plugin
   gazebo_opticalflow_mockup_plugin
@@ -353,6 +372,7 @@ set(plugins
   gazebo_catapult_plugin
   gazebo_usv_dynamics_plugin
   gazebo_parachute_plugin
+  gazebo_airship_dynamics_plugin
   )
 
 foreach(plugin ${plugins})

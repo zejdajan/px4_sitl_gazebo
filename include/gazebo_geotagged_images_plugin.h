@@ -73,18 +73,19 @@ private:
 
 private:
 
-    int         _imageCounter;
-    uint8_t     _mode;
-    uint32_t    _width;
-    uint32_t    _height;
-    uint32_t    _depth;
-    uint32_t    _destWidth;     ///< output size
-    uint32_t    _destHeight;
-    float       _maxZoom;
-    float       _zoom;
-    int         _captureCount;
-    double      _captureInterval;
-    int         _fd;
+    int         _imageCounter{0};
+    uint8_t     _mode{CAMERA_MODE_VIDEO};
+    uint32_t    _width{0};
+    uint32_t    _height{0};
+    uint32_t    _depth{0};
+    uint32_t    _destWidth{0};     ///< output size
+    uint32_t    _destHeight{0};
+    float       _maxZoom{8.0};
+    float       _zoom{1.0};
+    int         _captureCount{0};
+    double      _captureInterval{0.0};
+    int         _fd{-1};
+    int         _zoom_cmd{0};
 
     enum {
         CAPTURE_DISABLED,
@@ -92,21 +93,21 @@ private:
         CAPTURE_ELAPSED
     };
 
-    int         _captureMode;
+    int         _captureMode{CAPTURE_DISABLED};
 
     common::Time                _lastImageTime{};
     common::Time                _last_time{};
     common::Time                _last_heartbeat{};
-    sensors::CameraSensorPtr    _parentSensor;
-    rendering::CameraPtr        _camera;
-    rendering::ScenePtr         _scene;
-    event::ConnectionPtr        _newFrameConnection;
+    sensors::CameraSensorPtr    _parentSensor{nullptr};
+    rendering::CameraPtr        _camera{nullptr};
+    rendering::ScenePtr         _scene{nullptr};
+    event::ConnectionPtr        _newFrameConnection{nullptr};
     std::string                 _storageDir;
     ignition::math::Vector3d    _lastGpsPosition;
-    ignition::math::Angle       _hfov;      ///< Horizontal fov
-    transport::NodePtr          _node_handle;
+    ignition::math::Angle       _hfov{1.57};      ///< Horizontal fov
+    transport::NodePtr          _node_handle{nullptr};;
     std::string                 _namespace;
-    transport::SubscriberPtr    _gpsSub;
+    transport::SubscriberPtr    _gpsSub{nullptr};;
     std::string                 _format;
     struct sockaddr_in          _myaddr;    ///< The locally bound address
     struct sockaddr_in          _gcsaddr;   ///< GCS target

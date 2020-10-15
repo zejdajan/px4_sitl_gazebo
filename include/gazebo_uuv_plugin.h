@@ -26,31 +26,21 @@
 #include <gazebo/common/common.hh>
 #include <gazebo/common/Plugin.hh>
 #include <rotors_model/motor_model.hpp>
-#include "CommandMotorSpeed.pb.h"
 #include "gazebo/transport/transport.hh"
 #include "gazebo/msgs/msgs.hh"
-#include "MotorSpeed.pb.h"
 #include "Float.pb.h"
 #include "common.h"
 
-
-namespace turning_direction {
-const static int CCW = 1;
-const static int CW = -1;
-}
-
 namespace gazebo {
-typedef const boost::shared_ptr<const mav_msgs::msgs::CommandMotorSpeed> CommandMotorSpeedPtr;
 
-class GazeboUUVPlugin : public MotorModel, public ModelPlugin {
+class GazeboUUVPlugin : public ModelPlugin {
  public:
-  GazeboUUVPlugin()
-      : ModelPlugin(),
-        MotorModel(){
-  }
+  GazeboUUVPlugin() : ModelPlugin(){}
 
   virtual ~GazeboUUVPlugin();
   virtual void InitializeParams();
+  void ParseBuoyancy(sdf::ElementPtr _sdf);
+  void ApplyBuoyancy();
   virtual void Publish();
  protected:
   virtual void UpdateForcesAndMoments();
@@ -58,19 +48,16 @@ class GazeboUUVPlugin : public MotorModel, public ModelPlugin {
   virtual void OnUpdate(const common::UpdateInfo &);
 
  private:
+  struct buoyancy_s {
+    std::string model_name;
+    physics::LinkPtr link;
+    ignition::math::Vector3d buoyancy_force;
+    ignition::math::Vector3d cob;
+    double height_scale_limit;
+  };
+  std::vector<buoyancy_s> buoyancy_links_;
   std::string namespace_;
-  std::string command_sub_topic_;
   std::string link_base_;
-  std::string link_prop_0_;
-  std::string link_prop_1_;
-  std::string link_prop_2_;
-  std::string link_prop_3_;
-
-  int turning_directions_[4];
-  double motor_commands_[4];
-  double motor_force_constant_;
-  double motor_torque_constant_;
-  double dead_zone_;
 
   /* Hydro coefficients - FOSSEN 2011 */
   double X_u_;
@@ -88,17 +75,9 @@ class GazeboUUVPlugin : public MotorModel, public ModelPlugin {
   double N_rdot_;
 
   transport::NodePtr node_handle_;
-  transport::SubscriberPtr command_sub_;
   physics::ModelPtr model_;
   physics::LinkPtr baseLink_;
-  physics::LinkPtr prop0Link_;
-  physics::LinkPtr prop1Link_;
-  physics::LinkPtr prop2Link_;
-  physics::LinkPtr prop3Link_;
   event::ConnectionPtr updateConnection_;
-  boost::thread callback_queue_thread_;
-  void QueueThread();
-  void VelocityCallback(CommandMotorSpeedPtr &rot_velocities);
 
 };
 }
