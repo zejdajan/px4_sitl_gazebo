@@ -1327,7 +1327,15 @@ void GazeboMavlinkInterface::pollForMAVLinkMessages()
 
   bool received_actuator = false;
 
+  int antistuck_counter = 0;
+
   do {
+
+    if (antistuck_counter++ == 10) {
+      gzerr << "Breaking pollForMAVLinkMessages() after getting stuck in do-while" << "\n";
+      break;
+    }
+
     int timeout_ms = (received_first_actuator_ && enable_lockstep_) ? 1000 : 0;
     int ret = ::poll(&fds_[0], N_FDS, timeout_ms);
 
