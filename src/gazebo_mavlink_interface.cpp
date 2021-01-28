@@ -1329,69 +1329,61 @@ void GazeboMavlinkInterface::pollForMAVLinkMessages()
 
   int antistuck_counter = 0;
 
-  do {
+  int timeout_ms = (received_first_actuator_ && enable_lockstep_) ? 1000 : 0;
+  int ret = ::poll(&fds_[0], N_FDS, timeout_ms);
 
-    if (antistuck_counter++ == 10) {
-      gzerr << "Breaking pollForMAVLinkMessages() after getting stuck in do-while" << "\n";
-      break;
+  if (ret < 0) {
+    gzerr << "poll error: " << strerror(errno) << "\n";
+    return;
+  }
+
+  if (ret == 0 && timeout_ms > 0) {
+    gzerr << "poll timeout\n";
+    return;
+  }
+
+  for (int i = 0; i < N_FDS; i++) {
+    if(fds_[i].revents == 0) {
+      continue;
     }
 
-    int timeout_ms = (received_first_actuator_ && enable_lockstep_) ? 1000 : 0;
-    int ret = ::poll(&fds_[0], N_FDS, timeout_ms);
-
-    if (ret < 0) {
-      gzerr << "poll error: " << strerror(errno) << "\n";
-      return;
+    if (!(fds_[i].revents & POLLIN)) {
+      continue;
     }
 
-    if (ret == 0 && timeout_ms > 0) {
-      gzerr << "poll timeout\n";
-      return;
-    }
-
-    for (int i = 0; i < N_FDS; i++) {
-      if(fds_[i].revents == 0) {
+    if (i == LISTEN_FD) { // if event is raised on the listening socket
+      acceptConnections();
+    } else { // if event is raised on connection socket
+      int ret = recvfrom(fds_[i].fd, _buf, sizeof(_buf), 0, (struct sockaddr *)&remote_simulator_addr_, &remote_simulator_addr_len_);
+      if (ret < 0) {
+        // all data is read if EWOULDBLOCK is raised
+        if (errno != EWOULDBLOCK) { // disconnected from client
+          gzerr << "recvfrom error: " << strerror(errno) << "\n";
+        }
         continue;
       }
 
-      if (!(fds_[i].revents & POLLIN)) {
+      // client closed the connection orderly, only makes sense on tcp
+      if (use_tcp_ && ret == 0) {
+        gzerr << "Connection closed by client." << "\n";
+        close_conn_ = true;
         continue;
       }
 
-      if (i == LISTEN_FD) { // if event is raised on the listening socket
-        acceptConnections();
-      } else { // if event is raised on connection socket
-        int ret = recvfrom(fds_[i].fd, _buf, sizeof(_buf), 0, (struct sockaddr *)&remote_simulator_addr_, &remote_simulator_addr_len_);
-        if (ret < 0) {
-          // all data is read if EWOULDBLOCK is raised
-          if (errno != EWOULDBLOCK) { // disconnected from client
-            gzerr << "recvfrom error: " << strerror(errno) << "\n";
+      // data received
+      int len = ret;
+      mavlink_message_t msg;
+      mavlink_status_t status;
+      for (unsigned i = 0; i < len; ++i) {
+        if (mavlink_parse_char(MAVLINK_COMM_0, _buf[i], &msg, &status)) {
+          if (hil_mode_) {
+            send_mavlink_message(&msg);
           }
-          continue;
-        }
-
-        // client closed the connection orderly, only makes sense on tcp
-        if (use_tcp_ && ret == 0) {
-          gzerr << "Connection closed by client." << "\n";
-          close_conn_ = true;
-          continue;
-        }
-
-        // data received
-        int len = ret;
-        mavlink_message_t msg;
-        mavlink_status_t status;
-        for (unsigned i = 0; i < len; ++i) {
-          if (mavlink_parse_char(MAVLINK_COMM_0, _buf[i], &msg, &status)) {
-            if (hil_mode_) {
-              send_mavlink_message(&msg);
-            }
-            handle_message(&msg, received_actuator);
-          }
+          handle_message(&msg, received_actuator);
         }
       }
     }
-  } while (!close_conn_ && received_first_actuator_ && !received_actuator && enable_lockstep_ && IsRunning() && !gotSigInt_);
+  }
 }
 
 void GazeboMavlinkInterface::acceptConnections()
