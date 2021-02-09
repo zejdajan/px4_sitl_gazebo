@@ -1331,7 +1331,7 @@ void GazeboMavlinkInterface::pollForMAVLinkMessages()
 
   do {
 
-    if (antistuck_counter++ == 10) {
+    if (antistuck_counter++ >= 10) {
       gzerr << "Breaking pollForMAVLinkMessages() after getting stuck in do-while" << "\n";
       break;
     }
@@ -1341,12 +1341,12 @@ void GazeboMavlinkInterface::pollForMAVLinkMessages()
 
     if (ret < 0) {
       gzerr << "poll error: " << strerror(errno) << "\n";
-      return;
+      break;
     }
 
     if (ret == 0 && timeout_ms > 0) {
       gzerr << "poll timeout\n";
-      return;
+      break;
     }
 
     for (int i = 0; i < N_FDS; i++) {
@@ -1392,6 +1392,12 @@ void GazeboMavlinkInterface::pollForMAVLinkMessages()
       }
     }
   } while (!close_conn_ && received_first_actuator_ && !received_actuator && enable_lockstep_ && IsRunning() && !gotSigInt_);
+
+  if (antistuck_counter >= 2) {
+    gzwarn << antistuck_counter << "\n";
+  }
+
+  return;
 }
 
 void GazeboMavlinkInterface::acceptConnections()
